@@ -1,107 +1,148 @@
-: Agent with Multiple MCP Servers
-Objective: To learn how to configure a single OpenAI Agent to connect to and utilize tools from multiple MCP servers simultaneously.
+Sub-module 01: Connecting to an MCP Server (Streamable HTTP)
+Objective: To demonstrate the basic configuration and connection of an OpenAI Agent to an MCP server that uses the streamable-http transport, utilizing the MCPServerStreamableHttp client class from the OpenAI Agents SDK.
 
-🧪 What This Module Covers Practically
-This sub-module provides:
+Core Concept
+The primary goal here is to show an Agent being initialized with an MCPServerStreamableHttp instance. This instance acts as a client that points to a running MCP server. We want to confirm that the agent, upon initialization or when it first needs to interact with MCP tools, attempts to connect to this server. A common first interaction is for the agent (or the SDK on its behalf) to call list_tools() on the MCP server.
 
-Working Python scripts for multi-MCP integration
-Simulated or mock MCP server configurations
-An agent that interacts with tools hosted across these servers
-Insights into error handling, server isolation, and scalability
-Example Trace: Here both tools are on separate servers called by an Agent created using OpenAI Agents SDK.
+Key SDK Concepts:
+MCPServerStreamableHttpParams: For configuring connection details to a streamable-http MCP server.
+MCPServerStreamableHttp: The client class in the SDK for interacting with such servers.
+Agent(mcp_servers=[...]): How to make an agent aware of MCP servers.
+mcp_server_client.list_tools(): Directly invoking tool listing (also done implicitly by the Agent).
+Asynchronous Context Management (async with) for MCPServerStreamableHttp.
+Using Runner.run() to execute an agent with a query.
+Setup
+1. Run the Shared MCP Server
+For this and subsequent examples in module 06_openai_agents_sdk_integration, we will use a shared, standalone MCP server. This server is designed to be simple and provide a consistent target for our agent examples.
 
-🧠 Use Cases and Advantages
-🔌 Distributed Toolsets: Access tools hosted across different MCP servers — for example, one for weather, one for finance.
-🧱 Modular Architecture: Individual teams can host their tools independently while exposing a standard MCP interface.
-📈 Scalability and Resilience: Load can be distributed across MCPs; one server being down won't necessarily block agent capabilities.
-🌐 3rd-Party Integrations: Any external service exposing an MCP-compatible endpoint can be added seamlessly.
-⚙️ Configuration & Requirements
-The agent's mcp_servers parameter accepts a list of active MCP client instances.
-Each client should be configured via MCPServerStreamableHttpParams and managed inside an AsyncExitStack.
-✅ Recommended Async Pattern
+Location: 03_ai_protocols/01_mcp/06_openai_agents_sdk_integration/shared_mcp_server/server.py
+To Run:
+Open a new terminal.
+Navigate to the shared_mcp_server directory:
+cd 03_ai_protocols/01_mcp/06_openai_agents_sdk_integration/shared_mcp_server/
+Execute the server script (using uv run):
+uv run python server.py
+Server Details:
+It runs on http://localhost:8001.
+Its MCP protocol endpoint is at /mcp. So, the full URL for clients is http://localhost:8001/mcp.
+It exposes a tool named greet_from_shared_server.
+It will log incoming requests to its console.
+Keep this server running in its terminal while you execute the agent scripts from this sub-module.
+
+2. "Hello World" Agent SDK Connection
+Setup
+uv init agent_connect
+cd agent_connect
+
+uv add openai-agents
+Create a .env file and add GEMINI_API_KEY
+
+Code
+Create a file named main.py in this directory with the following content:
+
 import asyncio
-from contextlib import AsyncExitStack
-from agents.mcp import MCPServerStreamableHttp, MCPServerStreamableHttpParams
+import os
+from dotenv import load_dotenv, find_dotenv
+
 from agents import Agent, AsyncOpenAI, OpenAIChatCompletionsModel, Runner
+from agents.mcp import MCPServerStreamableHttp, MCPServerStreamableHttpParams
 
-# Define all MCP server URLs
-MCP_SERVER_URLS = [
-    "http://localhost:8001/mcp",
-    "http://localhost:8002/mcp",
-]
 
-# Setup client (e.g., OpenAI/Gemini-compatible)
+_: bool = load_dotenv(find_dotenv())
+
+# URL of our standalone MCP server (from shared_mcp_server)
+MCP_SERVER_URL = "http://localhost:8001/mcp/" # Ensure this matches your running server
+
+gemini_api_key = os.getenv("GEMINI_API_KEY")
+
+#Reference: https://ai.google.dev/gemini-api/docs/openai
 client = AsyncOpenAI(
-    api_key="your-api-key",
-    base_url="https://your-base-url",
+    api_key=gemini_api_key,
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
 )
 
 async def main():
-    mcp_servers = []
+    # 1. Configure parameters for the MCPServerStreamableHttp client
+    # These parameters tell the SDK how to reach the MCP server.
+    mcp_params = MCPServerStreamableHttpParams(url=MCP_SERVER_URL)
+    print(f"MCPServerStreamableHttpParams configured for URL: {mcp_params.get('url')}")
 
-    async with AsyncExitStack() as stack:
-        for url in MCP_SERVER_URLS:
-            mcp_params = MCPServerStreamableHttpParams(url=url)
-            mcp_server_client = await stack.enter_async_context(
-                MCPServerStreamableHttp(params=mcp_params, name=f"MCPClient_{url}")
+    # 2. Create an instance of the MCPServerStreamableHttp client.
+    # This object represents our connection to the specific MCP server.
+    # It's an async context manager, so we use `async with` for proper setup and teardown.
+    # The `name` parameter is optional but useful for identifying the server in logs or multi-server setups.
+    async with MCPServerStreamableHttp(params=mcp_params, name="MySharedMCPServerClient") as mcp_server_client:
+        print(f"MCPServerStreamableHttp client '{mcp_server_client.name}' created and entered context.")
+        print("The SDK will use this client to interact with the MCP server.")
+
+        # 3. Create an agent and pass the MCP server client to it.
+        # When an agent is initialized with mcp_servers, the SDK often attempts
+        # to list tools from these servers to make the LLM aware of them.
+        # You might see a `list_tools` call logged by your shared_mcp_server.
+        try:
+            assistant = Agent(
+                name="MyMCPConnectedAssistant",
+                mcp_servers=[mcp_server_client],
+                model=OpenAIChatCompletionsModel(model="gemini-2.0-flash", openai_client=client),
             )
-            mcp_servers.append(mcp_server_client)
+            
+            print(f"Agent '{assistant.name}' initialized with MCP server: '{mcp_server_client.name}'.")
+            print("Check the logs of your shared_mcp_server for a 'tools/list' request.")
 
-        assistant = Agent(
-            name="MultiMCPAgent",
-            instructions="You are a multi-server agent.",
-            mcp_servers=mcp_servers,
-            model=OpenAIChatCompletionsModel(model="gemini-2.0-flash", openai_client=client),
-        )
+            # 4. Explicitly list tools to confirm connection and tool discovery.
+            print(f"Attempting to explicitly list tools from '{mcp_server_client.name}'...")
+            tools = await mcp_server_client.list_tools()
+            print(f"Tools: {tools}")
 
-        result = await Runner.run(assistant, "Get today's weather and Tesla stock price.")
-        print(f"[AGENT RESPONSE]: {result.final_output}")
+            print("\n\nRunning a simple agent interaction...")
+            result = await Runner.run(assistant, "What is Sir Zia mood?")
+            print(f"\n\n[AGENT RESPONSE]: {result.final_output}")
 
-asyncio.run(main())
-🚀 Running the Example Step-by-Step
-To run the example and see an agent connect to multiple MCP servers:
+        except Exception as e:
+            print(f"An error occurred during agent setup or tool listing: {e}")
 
-Start the MCP Servers: You need to run two MCP servers: one for mood and one for weather. These servers are located in the mcp_servers subdirectory within this example module (04_agent_with_multiple_mcp_servers). Open two separate terminals.
+    print(f"MCPServerStreamableHttp client '{mcp_server_client.name}' context exited.")
+    print(f"--- Agent Connection Test End ---")
 
-Mood Server (runs on port 8001): In your first terminal, navigate to the mcp_servers directory:
-cd mcp_servers
-uv run python mood_server.py
-This server provides a mood_from_shared_server tool.
-Weather Server (runs on port 8002): In your second terminal, also navigate to the mcp_servers directory:
-cd mcp_servers
-uv run python weather_server.py
-This server provides a get_forecast tool.
-Ensure both servers start successfully. They will log information to their respective terminals (e.g., "INFO: Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)"). You can leave these terminals running.
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print(f"An unhandled error occurred in the agent script: {e}")
+Explanation of the Code
+MCP_SERVER_URL: Points to the shared MCP server.
+MCPServerStreamableHttpParams & MCPServerStreamableHttp:
+Configures and creates the client to connect to the MCP server, as explained in previous versions.
+Agent Initialization:
+The Agent is initialized with a name, instructions, the mcp_servers (pointing to our mcp_server_client), and a model.
+The model is an OpenAIChatCompletionsModel configured with model="gemini-2.0-flash" and the openai_client (which is our Gemini client).
+Explicit list_tools():
+The script explicitly calls await mcp_server_client.list_tools() to verify the connection and log the available tools. It checks for the presence of both greet_from_shared_server and mood_from_shared_server.
+Runner.run(assistant, "What is Junaid's mood?"):
+This line executes the agent with a specific query.
+The Runner.run method handles the interaction flow: sending the query and instructions to the LLM, processing any tool calls the LLM decides to make (via the configured MCP server), and returning the final result.
+The query "What is Junaid's mood?" is designed to potentially trigger the mood_from_shared_server tool if the LLM deems it appropriate.
+Expected Output/Behavior
+When you run uv run python main.py (after starting the shared_mcp_server/server_main.py and ensuring your .env file has GEMINI_API_KEY):
 
-Configure Environment Variables: The agent code, located in agent_connect/main.py (within this example module), uses an API key for a Gemini model via AsyncOpenAI.
+Agent Script Terminal (main.py output):
 
-Navigate to the agent_connect subdirectory.
-Create a .env file (e.g., agent_connect/.env) if it doesn't already exist.
-Add your GEMINI_API_KEY to this file:
-GEMINI_API_KEY="your_actual_api_key_here"
-The main.py script is also configured for LangSmith tracing. If you wish to use LangSmith, ensure your LANGCHAIN_API_KEY, LANGCHAIN_TRACING_V2="true", and LANGCHAIN_PROJECT="your-project-name" environment variables are set (e.g., in the same .env file or your shell environment).
-Run the Agent: If you're not already there, navigate to the agent_connect subdirectory from the root of this example module (04_agent_with_multiple_mcp_servers):
+Logs indicating connection steps.
+Logs from httpx showing HTTP requests to the MCP server (http://localhost:8001/mcp/) and the Gemini API (https://generativelanguage.googleapis.com/...).
+Confirmation of MySharedMCPServerClient creation.
+Agent initialization logs.
+Successful listing of tools from the MCP server, including greet_from_shared_server and mood_from_shared_server.
+Log "Running a simple agent interaction..."
+Further httpx logs for interactions with MCP and Gemini during the Runner.run call.
+The final agent response, similar to: [AGENT RESPONSE]: OK. Junaid is happy. (The exact response depends on the LLM and potential tool execution).
+Logs indicating client context exit and test end.
+Shared MCP Server Terminal (server_main.py output):
 
-cd agent_connect
-Then, run the main agent script:
-
-uv run python main.py
-The agent will attempt to connect to both MCP servers, aggregate their tools (mood_from_shared_server and get_forecast), and then process a query like "What is Junaid's mood and what is the weather in London?". You should see output in the terminal indicating the agent's interaction (including tool calls identified by the MCP server client names) and its final response.
-
-Observe Tracing (Optional but Recommended): As agent_connect/main.py is configured with OpenAIAgentsTracingProcessor (using typing.cast for linter compatibility), if your LangSmith environment variables are correctly set up:
-
-You can navigate to your project in LangSmith to view the detailed trace of the agent's execution.
-This trace will clearly show the agent's decision-making process, which tools were invoked, which MCP server handled each call (identifiable by the client name like MCPServerClient_http://localhost:8001/mcp), and the data flowing through the system. This is invaluable for debugging, understanding multi-MCP interactions, and verifying that tools from different servers are being utilized correctly.
-🧰 Aggregated Tool Management
-When an agent connects to multiple MCP servers, it aggregates the toolset into one logical registry.
-Calls to agent.tools or decisions by the LLM automatically consider all tools from all MCP sources.
-🚨 Tool Name Uniqueness & Conflict Handling
-Important: Tool names must be unique across all connected MCPs.
-
-Conflicts (e.g., two get_weather tools) can cause unpredictable behavior, depending on internal resolution order.
-
-Best Practice: Use namespacing or prefixing conventions like:
-
-finance_get_stock_price
-weather_get_forecast
-The SDK does not currently resolve these conflicts automatically — this is developer responsibility.
+You should see log messages indicating it received tools/list requests.
+If the LLM decided to use the mood_from_shared_server tool (or another tool), you'll see corresponding tool/run requests logged by the server. For example:
+INFO:SharedStandAloneMCPServer:MCP Request ID '...' received: tools/list
+INFO:SharedStandAloneMCPServer:Responding to 'tools/list' (ID '...') with 2 tool(s).
+...
+INFO:SharedStandAloneMCPServer:MCP Request ID '...' received: tool/run (tool_name='mood_from_shared_server')
+INFO:SharedStandAloneMCPServer:Running tool 'mood_from_shared_server' with args: {'name': 'Junaid'}
+INFO:SharedStandAloneMCPServer:Tool 'mood_from_shared_server' execution successful.
